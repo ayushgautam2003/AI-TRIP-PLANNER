@@ -8,6 +8,7 @@ const geist = Geist({ variable: '--font-geist-sans', subsets: ['latin'] });
 export const metadata = {
   title: 'AI Trip Planner',
   description: 'Plan your perfect trip with the power of AI',
+  icons: { icon: 'data:,' },
 };
 
 export default function RootLayout({ children }) {
