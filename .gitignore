@@ -26,3 +26,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.pem
+
+# Claude Code
+.claude/
