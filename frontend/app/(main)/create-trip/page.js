@@ -1,11 +1,12 @@
 'use client';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import api from '@/lib/api';
 import { TRAVELER_OPTIONS, BUDGET_OPTIONS, INTEREST_OPTIONS } from '@/constants/options';
 import { Loader2, MapPin } from 'lucide-react';
 import GooglePlacesAutocomplete from 'react-google-places-autocomplete';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 
 const AGENT_STEPS = [
   { emoji: '🔍', label: 'Destination Research Agent',  detail: 'Gathering local intelligence & insights…' },
@@ -16,7 +17,6 @@ const AGENT_STEPS = [
   { emoji: '✅', label: 'Finalising your trip plan',    detail: 'Assembling everything together…' },
 ];
 
-// Dark theme styles for GooglePlacesAutocomplete
 const placesStyles = {
   control: (base) => ({
     ...base,
@@ -64,31 +64,12 @@ export default function CreateTripPage() {
   const [interests, setInterests] = useState([]);
   const [generating, setGenerating] = useState(false);
   const [agentStep, setAgentStep] = useState(0);
+  const [completedSteps, setCompletedSteps] = useState(new Set());
   const [error, setError] = useState('');
-  const stepTimerRef = useRef(null);
 
   useEffect(() => {
     if (!authLoading && !user) router.push('/login');
   }, [user, authLoading, router]);
-
-  useEffect(() => {
-    if (!generating) {
-      clearInterval(stepTimerRef.current);
-      setAgentStep(0);
-      return;
-    }
-    const hasFoodInterest = interests.some(i =>
-      i.toLowerCase().includes('food') || i.toLowerCase().includes('cuisine') || i.toLowerCase().includes('restaurant')
-    );
-    const steps = hasFoodInterest ? AGENT_STEPS : AGENT_STEPS.filter((_, i) => i !== 4);
-    let current = 0;
-    setAgentStep(0);
-    stepTimerRef.current = setInterval(() => {
-      current = Math.min(current + 1, steps.length - 1);
-      setAgentStep(current);
-    }, 4000);
-    return () => clearInterval(stepTimerRef.current);
-  }, [generating, interests]);
 
   function toggleInterest(interest) {
     setInterests(prev =>
@@ -105,21 +86,78 @@ export default function CreateTripPage() {
       setError('Days must be between 1 and 30.');
       return;
     }
+
     setError('');
     setGenerating(true);
+    setAgentStep(0);
+    setCompletedSteps(new Set());
+
+    const token = localStorage.getItem('token');
+
     try {
-      const { data } = await api.post('/api/trips', {
-        destination: destination.label,
-        destinationPlaceId: destination.value?.place_id,
-        days: Number(days),
-        budgetType,
-        travelersType,
-        interests,
+      const response = await fetch(`${API_URL}/api/trips/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          destination: destination.label,
+          destinationPlaceId: destination.value?.place_id,
+          days: Number(days),
+          budgetType,
+          travelersType,
+          interests,
+        }),
       });
-      router.push(`/trip/${data.trip._id}`);
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.message || 'Failed to generate trip.');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep incomplete line
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (currentEvent === 'progress') {
+                setCompletedSteps(prev => {
+                  const next = new Set(prev);
+                  if (data.stepIndex > 0) next.add(data.stepIndex - 1);
+                  return next;
+                });
+                setAgentStep(data.stepIndex);
+              } else if (currentEvent === 'complete') {
+                router.push(`/trip/${data.tripId}`);
+              } else if (currentEvent === 'error') {
+                throw new Error(data.message);
+              }
+            } catch (parseErr) {
+              if (parseErr.message !== 'Unexpected token') throw parseErr;
+            }
+          }
+        }
+      }
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to generate trip. Please try again.');
+      setError(err.message || 'Failed to generate trip. Please try again.');
       setGenerating(false);
+      setAgentStep(0);
+      setCompletedSteps(new Set());
     }
   }
 
@@ -144,37 +182,37 @@ export default function CreateTripPage() {
 
       {generating ? (
 
-        /* ── Agent progress card ── */
+        /* ── Real agent progress ── */
         <div className="bg-[#1e293b] border border-white/8 rounded-2xl p-8 text-center">
           <div className="mb-6 text-5xl leading-none">{activeSteps[agentStep]?.emoji}</div>
           <h2 className="text-xl font-bold text-white mb-2">{activeSteps[agentStep]?.label}</h2>
           <p className="text-slate-400 text-sm mb-10">{activeSteps[agentStep]?.detail}</p>
 
           <div className="space-y-3 text-left max-w-sm mx-auto">
-            {activeSteps.map((step, idx) => (
-              <div key={idx} className="flex items-center gap-3">
-                <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 transition-all ${
-                  idx < agentStep
-                    ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-400'
-                    : idx === agentStep
-                    ? 'bg-violet-500/20 border border-violet-500/40 text-violet-400'
-                    : 'bg-[#334155] border border-white/12 text-slate-500'
-                }`}>
-                  {idx < agentStep
-                    ? '✓'
-                    : idx === agentStep
-                    ? <Loader2 className="w-3 h-3 animate-spin" />
-                    : idx + 1}
+            {activeSteps.map((step, idx) => {
+              const isDone = completedSteps.has(idx);
+              const isActive = idx === agentStep;
+              return (
+                <div key={idx} className="flex items-center gap-3">
+                  <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0 transition-all ${
+                    isDone
+                      ? 'bg-emerald-500/20 border border-emerald-500/40 text-emerald-400'
+                      : isActive
+                      ? 'bg-violet-500/20 border border-violet-500/40 text-violet-400'
+                      : 'bg-[#334155] border border-white/12 text-slate-500'
+                  }`}>
+                    {isDone ? '✓' : isActive ? <Loader2 className="w-3 h-3 animate-spin" /> : idx + 1}
+                  </div>
+                  <span className={`text-sm ${
+                    isDone    ? 'text-emerald-400/60 line-through' :
+                    isActive  ? 'text-white font-semibold' :
+                    'text-slate-500'
+                  }`}>
+                    {step.label}
+                  </span>
                 </div>
-                <span className={`text-sm ${
-                  idx < agentStep  ? 'text-emerald-400/60 line-through' :
-                  idx === agentStep ? 'text-white font-semibold' :
-                  'text-slate-500'
-                }`}>
-                  {step.label}
-                </span>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <p className="text-xs text-slate-500 mt-10">AI is crafting your perfect itinerary — this takes 20–40 seconds</p>

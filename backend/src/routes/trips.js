@@ -6,6 +6,60 @@ import { generateTripPlan, regenerateDay } from '../agents/orchestrator.js';
 const router = express.Router();
 router.use(protect);
 
+// POST /api/trips/stream — SSE: real-time agent progress + save trip
+router.post('/stream', async (req, res) => {
+  const { destination, destinationPlaceId, days, budgetType, interests, travelersType } = req.body;
+
+  if (!destination || !days || !budgetType || !travelersType)
+    return res.status(400).json({ message: 'destination, days, budgetType and travelersType are required' });
+
+  if (days < 1 || days > 30)
+    return res.status(400).json({ message: 'Days must be between 1 and 30' });
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  // Keep connection alive through proxies/load balancers
+  const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000);
+  req.on('close', () => clearInterval(heartbeat));
+
+  try {
+    const result = await generateTripPlan(
+      { destination, days, budgetType, interests: interests || [], travelersType },
+      (progress) => send('progress', progress)
+    );
+
+    const trip = await Trip.create({
+      userId: req.user._id,
+      destination,
+      destinationPlaceId,
+      days,
+      budgetType,
+      interests: interests || [],
+      travelersType,
+      itinerary: result.itinerary,
+      hotels: result.hotels,
+      restaurants: result.restaurants,
+      estimatedBudget: result.estimatedBudget,
+      destinationInsights: result.destinationInsights,
+      emergencyInfo: result.emergencyInfo,
+    });
+
+    send('complete', { tripId: trip._id });
+  } catch {
+    send('error', { message: 'Failed to generate trip. Please try again.' });
+  } finally {
+    clearInterval(heartbeat);
+    res.end();
+  }
+});
+
 // POST /api/trips — orchestrate all agents + save trip
 router.post('/', async (req, res) => {
   const { destination, destinationPlaceId, days, budgetType, interests, travelersType } = req.body;

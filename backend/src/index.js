@@ -24,4 +24,14 @@ app.use((err, req, res, _next) => {
 
 connectDB().then(() => {
   app.listen(PORT);
+
+  // Keep MongoDB Atlas M0 warm — ping every 4 minutes to prevent auto-pause
+  if (process.env.NODE_ENV === 'production') {
+    setInterval(async () => {
+      try {
+        const { default: Trip } = await import('./models/Trip.js');
+        await Trip.findOne().lean();
+      } catch { /* silent */ }
+    }, 4 * 60 * 1000);
+  }
 });
