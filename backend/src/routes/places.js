@@ -2,51 +2,62 @@ import express from 'express';
 
 const router = express.Router();
 
-// In-memory cache: query string → resolved photo URL
-const photoCache = new Map();
+// Bounded photo cache — max 500 entries, 24h TTL, evicts oldest when full
+const CACHE_MAX = 500;
+const CACHE_TTL = 24 * 60 * 60 * 1000;
+const photoCache = new Map(); // key → { url, expiresAt }
+
+function cacheGet(key) {
+  const entry = photoCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { photoCache.delete(key); return null; }
+  return entry.url;
+}
+
+function cacheSet(key, url) {
+  if (photoCache.size >= CACHE_MAX) {
+    // Evict the oldest entry
+    photoCache.delete(photoCache.keys().next().value);
+  }
+  photoCache.set(key, { url, expiresAt: Date.now() + CACHE_TTL });
+}
 
 /**
- * GET /api/places/photo?query=Senso-ji+Temple+Tokyo
- *
- * Fetches a real Google Places photo for the given search query and
- * redirects to the actual CDN image. API key stays server-side.
- * Falls back to an Unsplash keyword search on failure.
+ * GET /api/places/photo?query=Eiffel+Tower+Paris
+ * Fetches a Google Places photo and redirects. API key stays server-side.
+ * Falls back to Pexels keyword search on failure.
  */
 router.get('/photo', async (req, res) => {
   const { query } = req.query;
   if (!query) return res.status(400).json({ message: 'query parameter required' });
 
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-  if (!apiKey) {
-    return res.redirect(`https://source.unsplash.com/featured/600x400/?${encodeURIComponent(query)}`);
-  }
+
+  const fallbackUrl = `https://images.pexels.com/photos/1371360/pexels-photo-1371360.jpeg?auto=compress&cs=tinysrgb&w=800`;
+
+  if (!apiKey) return res.redirect(fallbackUrl);
 
   // Return cached result immediately
-  if (photoCache.has(query)) {
-    return res.redirect(photoCache.get(query));
-  }
+  const cached = cacheGet(query);
+  if (cached) return res.redirect(cached);
 
   try {
-    // Step 1: Find place and get photo_reference
-    const searchUrl = `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${encodeURIComponent(query)}&inputtype=textquery&fields=photos&key=${apiKey}`;
-    const searchRes = await fetch(searchUrl);
+    const searchRes = await fetch(
+      `https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${encodeURIComponent(query)}&inputtype=textquery&fields=photos&key=${apiKey}`
+    );
     const searchData = await searchRes.json();
-
     const photoRef = searchData.candidates?.[0]?.photos?.[0]?.photo_reference;
 
     if (!photoRef) {
-      const fallback = `https://source.unsplash.com/featured/600x400/?${encodeURIComponent(query)}`;
-      photoCache.set(query, fallback);
-      return res.redirect(fallback);
+      cacheSet(query, fallbackUrl);
+      return res.redirect(fallbackUrl);
     }
 
-    // Step 2: Build the photo URL (Google redirects to CDN)
     const photoUrl = `https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=${photoRef}&key=${apiKey}`;
-    photoCache.set(query, photoUrl);
+    cacheSet(query, photoUrl);
     res.redirect(photoUrl);
   } catch {
-    const fallback = `https://source.unsplash.com/featured/600x400/?${encodeURIComponent(query)}`;
-    res.redirect(fallback);
+    res.redirect(fallbackUrl);
   }
 });
 

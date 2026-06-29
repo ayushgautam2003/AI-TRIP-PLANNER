@@ -22,18 +22,31 @@ router.post('/stream', async (req, res) => {
   res.flushHeaders();
 
   const send = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
 
-  // Keep connection alive through proxies/load balancers
-  const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000);
-  req.on('close', () => clearInterval(heartbeat));
+  // Abort signal — fires on client disconnect OR 90s timeout
+  const controller = new AbortController();
+  const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': heartbeat\n\n'); }, 15000);
+  const timeout = setTimeout(() => controller.abort('timeout'), 90_000);
+
+  req.on('close', () => controller.abort('disconnect'));
 
   try {
-    const result = await generateTripPlan(
-      { destination, days, budgetType, interests: interests || [], travelersType },
-      (progress) => send('progress', progress)
-    );
+    // Race: generation vs abort
+    const result = await Promise.race([
+      generateTripPlan(
+        { destination, days, budgetType, interests: interests || [], travelersType },
+        (progress) => send('progress', progress)
+      ),
+      new Promise((_, reject) => {
+        controller.signal.addEventListener('abort', () =>
+          reject(new Error(controller.signal.reason === 'timeout'
+            ? 'Generation timed out. Please try again.'
+            : 'Request cancelled.'))
+        );
+      }),
+    ]);
 
     const trip = await Trip.create({
       userId: req.user._id,
@@ -52,9 +65,12 @@ router.post('/stream', async (req, res) => {
     });
 
     send('complete', { tripId: trip._id });
-  } catch {
-    send('error', { message: 'Failed to generate trip. Please try again.' });
+  } catch (err) {
+    if (err.message !== 'Request cancelled.') {
+      send('error', { message: err.message || 'Failed to generate trip. Please try again.' });
+    }
   } finally {
+    clearTimeout(timeout);
     clearInterval(heartbeat);
     res.end();
   }
