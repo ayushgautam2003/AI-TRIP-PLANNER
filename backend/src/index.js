@@ -13,8 +13,8 @@ import placesRoutes from './routes/places.js';
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Security headers
-app.use(helmet());
+// Security headers (CSP disabled — Railway API is consumed by Vercel frontend, not served to browsers directly)
+app.use(helmet({ contentSecurityPolicy: false }));
 
 // Gzip all responses
 app.use(compression());
@@ -36,16 +36,6 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Trip generation: 5 generations per hour per user
-const tripGenLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000,
-  max: 5,
-  keyGenerator: (req) => req.headers.authorization || req.ip,
-  message: { message: 'Trip generation limit reached. Please wait an hour before generating more trips.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
 // General API: 200 requests per minute
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -60,7 +50,7 @@ app.use('/api/auth', authLimiter);
 // ── Routes ───────────────────────────────────────────────────────────────────
 
 app.use('/api/auth', authRoutes);
-app.use('/api/trips', tripGenLimiter, tripRoutes);
+app.use('/api/trips', tripRoutes);
 app.use('/api/places', placesRoutes);
 
 // ── Health check — tests every pipeline ─────────────────────────────────────
@@ -104,14 +94,4 @@ app.use((err, req, res, _next) => {
 connectDB().then(() => {
   app.listen(PORT);
   console.log(`Server running on port ${PORT}`);
-
-  // Keep MongoDB Atlas M0 warm — ping every 4 minutes to prevent auto-pause
-  if (process.env.NODE_ENV === 'production') {
-    setInterval(async () => {
-      try {
-        const { default: Trip } = await import('./models/Trip.js');
-        await Trip.findOne().lean();
-      } catch { /* silent */ }
-    }, 4 * 60 * 1000);
-  }
 });

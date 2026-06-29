@@ -1,4 +1,5 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import Trip from '../models/Trip.js';
 import { protect } from '../middleware/auth.js';
 import { generateTripPlan, regenerateDay } from '../agents/orchestrator.js';
@@ -6,8 +7,18 @@ import { generateTripPlan, regenerateDay } from '../agents/orchestrator.js';
 const router = express.Router();
 router.use(protect);
 
+// Trip generation: 5 per hour per user (only for /stream, not read/delete)
+const tripGenLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req) => req.headers.authorization || req.ip,
+  message: { message: 'Trip generation limit reached. Please wait an hour before generating more trips.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // POST /api/trips/stream — SSE: real-time agent progress + save trip
-router.post('/stream', async (req, res) => {
+router.post('/stream', tripGenLimiter, async (req, res) => {
   const { destination, destinationPlaceId, days, budgetType, interests, travelersType } = req.body;
 
   if (!destination || !days || !budgetType || !travelersType)
